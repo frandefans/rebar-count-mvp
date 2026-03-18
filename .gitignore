@@ -166,3 +166,7 @@ model_full/*
 model_smoke/*
 !model_smoke/model_final.pth
 results/
+# mvp runtime artifacts
+rebar_mvp/counting-api/storage/
+rebar_mvp/counting-api/artifacts/
+

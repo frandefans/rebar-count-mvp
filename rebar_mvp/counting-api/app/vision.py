@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import math
@@ -71,7 +71,7 @@ def assess_quality(image: np.ndarray) -> dict:
         "quality_score": score,
         "occlusion_level": occlusion,
         "recognizable": score >= 0.6,
-        "retake_advice": "�벹�ģ��˺�벽�����뾵��������⣬��֤�����Խ���" if score < 0.6 else "",
+        "retake_advice": "请补拍：退后半步完整入镜，避免逆光，保证清晰对焦。" if score < 0.6 else "",
     }
 
 
@@ -81,22 +81,6 @@ def _boxes_to_tensor(boxes: list[dict]) -> tuple[torch.Tensor, torch.Tensor]:
     t_boxes = torch.tensor([[b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"]] for b in boxes], dtype=torch.float32)
     t_scores = torch.tensor([b["score"] for b in boxes], dtype=torch.float32)
     return t_boxes, t_scores
-
-
-def _box_iou(a: dict, b: dict) -> float:
-    ax1, ay1 = a["x"], a["y"]
-    ax2, ay2 = ax1 + a["w"], ay1 + a["h"]
-    bx1, by1 = b["x"], b["y"]
-    bx2, by2 = bx1 + b["w"], by1 + b["h"]
-    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
-    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
-    inter = inter_w * inter_h
-    if inter <= 0:
-        return 0.0
-    area_a = a["w"] * a["h"]
-    area_b = b["w"] * b["h"]
-    denom = area_a + area_b - inter
-    return float(inter / denom) if denom > 0 else 0.0
 
 
 def dedup_center_distance(boxes: list[dict], shape: tuple[int, int]) -> list[dict]:
@@ -156,6 +140,34 @@ def cluster_regions(shape: tuple[int, int], boxes: list[dict]) -> list[dict]:
     return [{"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]} for r in regions]
 
 
+def _center(box: dict) -> tuple[float, float]:
+    return box["x"] + 0.5 * box["w"], box["y"] + 0.5 * box["h"]
+
+
+def _in_region(cx: float, cy: float, region: dict, pad_ratio: float = 0.08) -> bool:
+    x, y, w, h = region["x"], region["y"], region["w"], region["h"]
+    pad_x = w * pad_ratio
+    pad_y = h * pad_ratio
+    return (x - pad_x) <= cx <= (x + w + pad_x) and (y - pad_y) <= cy <= (y + h + pad_y)
+
+
+def filter_primary_cluster_boxes(boxes: list[dict], shape: tuple[int, int]) -> list[dict]:
+    if len(boxes) < 8:
+        return boxes
+    regions = cluster_regions(shape, boxes)
+    if not regions:
+        return boxes
+
+    primary = regions[0]
+    kept = []
+    for b in boxes:
+        cx, cy = _center(b)
+        if _in_region(cx, cy, primary, pad_ratio=0.08):
+            kept.append(b)
+
+    return kept if len(kept) >= max(6, int(0.6 * len(boxes))) else boxes
+
+
 def build_overlay(image: np.ndarray, head_boxes: list[dict], regions: list[dict]) -> str | None:
     canvas = image.copy()
     for box in head_boxes[:800]:
@@ -207,20 +219,25 @@ def detect_rebar_heads(image: np.ndarray) -> dict:
         nms_boxes = []
 
     dedup_boxes = dedup_center_distance(nms_boxes, image.shape[:2])
-    regions = cluster_regions(image.shape[:2], dedup_boxes)
-    if not regions and dedup_boxes:
-        xs = [b["x"] for b in dedup_boxes]
-        ys = [b["y"] for b in dedup_boxes]
-        x2s = [b["x"] + b["w"] for b in dedup_boxes]
-        y2s = [b["y"] + b["h"] for b in dedup_boxes]
+    cluster_boxes = filter_primary_cluster_boxes(dedup_boxes, image.shape[:2])
+
+    regions = cluster_regions(image.shape[:2], cluster_boxes)
+    if not regions and cluster_boxes:
+        xs = [b["x"] for b in cluster_boxes]
+        ys = [b["y"] for b in cluster_boxes]
+        x2s = [b["x"] + b["w"] for b in cluster_boxes]
+        y2s = [b["y"] + b["h"] for b in cluster_boxes]
         regions = [{"x": min(xs), "y": min(ys), "w": max(x2s) - min(xs), "h": max(y2s) - min(ys)}]
 
     return {
-        "head_count": len(dedup_boxes),
+        "head_count": len(cluster_boxes),
         "bundle_count": len(regions),
         "regions": regions,
-        "overlay_image_b64": build_overlay(image, dedup_boxes, regions),
-        "method": f"torch_frcnn_nms_clustered(raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)})",
+        "overlay_image_b64": build_overlay(image, cluster_boxes, regions),
+        "method": (
+            "torch_frcnn_nms_clustered"
+            f"(raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)},cluster={len(cluster_boxes)})"
+        ),
         "model_path": model_path,
     }
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import uuid
@@ -94,7 +94,7 @@ async def create_task(metadata: str = Form(...), image: UploadFile = File(...), 
 
         retake = quality["retake_advice"]
         if score < 0.6 and not retake:
-            retake = "���������㣬���ȱ�֤�����Ⱥ͵��������ԡ�"
+            retake = "请重新拍摄，优先保证清晰度和吊牌完整性。"
 
         estimated_weight = 0.0
         if norm.get("unit_weight_kg_m"):
@@ -162,3 +162,5 @@ def normalize_spec_api(req: SpecReq):
 
 
 app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>�ֽ��ͷ���� MVP</title>
+  <style>
+    :root { --bg:#f5f7fb; --card:#fff; --accent:#0f766e; --text:#0f172a; --muted:#64748b; --error:#b91c1c; --ok:#047857; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"PingFang SC","Microsoft YaHei",sans-serif; background:linear-gradient(180deg,#ecfeff 0%,var(--bg) 35%,#eef2ff 100%); color:var(--text); }
+    .wrap { max-width:760px; margin:0 auto; padding:16px; }
+    .title { font-size:24px; font-weight:700; margin:10px 4px 16px; }
+    .card { background:var(--card); border-radius:14px; padding:16px; box-shadow:0 10px 30px rgba(15,23,42,.08); margin-bottom:14px; }
+    .grid { display:grid; grid-template-columns:1fr; gap:10px; }
+    label { font-size:14px; font-weight:600; }
+    input, button { width:100%; border-radius:10px; border:1px solid #cbd5e1; padding:10px; font-size:14px; }
+    button { background:var(--accent); color:#fff; border:none; font-weight:700; margin-top:8px; }
+    .status { color:var(--muted); font-size:13px; margin-top:6px; }
+    .result-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .pill { display:inline-block; background:#ccfbf1; color:#115e59; padding:3px 8px; border-radius:999px; font-size:12px; margin-right:6px; margin-bottom:4px; }
+    .overlay-img { width:100%; border-radius:10px; border:1px solid #cbd5e1; margin-top:10px; }
+    .error { color:var(--error); }
+    .ok { color:var(--ok); }
+    @media (max-width:600px){ .result-grid { grid-template-columns:1fr; } .title{ font-size:20px; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">�ֽ��ͷ���� MVP����ͼ�ϴ���</div>
+    <div class="card">
+      <form id="capture-form" class="grid">
+        <label>��Ŀ����<input name="project_name" required /></label>
+        <label>����<input name="batch" required /></label>
+        <label>����<input name="yard" required /></label>
+        <label>������<input name="photographer" required /></label>
+        <label>����ʱ��<input type="datetime-local" name="captured_at" required /></label>
+        <label>�ֳ�ͼƬ���ش���<input type="file" name="image" accept="image/*" capture="environment" required /></label>
+        <label>����ͼ����ѡ��<input type="file" name="tag_image" accept="image/*" capture="environment" /></label>
+        <button id="submit-btn" type="submit">�ύʶ������</button>
+        <div id="status" class="status">�ȴ��ύ</div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:700; margin-bottom:8px;">ʶ����</div>
+      <div id="result-empty" class="status">���޽��</div>
+      <div id="result" style="display:none;"></div>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById("capture-form");
+    const statusEl = document.getElementById("status");
+    const submitBtn = document.getElementById("submit-btn");
+    const resultEl = document.getElementById("result");
+    const resultEmptyEl = document.getElementById("result-empty");
+
+    const setStatus = (msg, cls="status") => { statusEl.className = cls; statusEl.textContent = msg; };
+
+    function renderResult(data) {
+      resultEmptyEl.style.display = "none";
+      resultEl.style.display = "block";
+      const anomalies = (data.anomaly_codes || []).map(code => `<span class="pill">${code}</span>`).join("") || "��";
+      const regions = data.detection_regions || [];
+      const headCount = (data.rebar_head_count ?? data.detected_head_count ?? 0);
+      const method = data.detection_method || "unknown";
+      const overlayHtml = data.overlay_image_b64
+        ? `<div style="margin-top:10px;"><strong>�������ͼ��</strong><img class="overlay-img" src="data:image/jpeg;base64,${data.overlay_image_b64}" alt="overlay" /></div>`
+        : "";
+
+      resultEl.innerHTML = `
+        <div class="result-grid">
+          <div><strong>�ֽ��ͷ����</strong>${headCount}</div>
+          <div><strong>��������(kg)��</strong>${data.estimated_weight_kg}</div>
+          <div><strong>����������</strong>${data.bundle_count}</div>
+          <div><strong>���Ŷȣ�</strong>${(data.confidence_score * 100).toFixed(1)}%</div>
+        </div>
+        <div style="margin-top:10px;"><strong>��ⷽ����</strong>${method}</div>
+        <div style="margin-top:10px;"><strong>����������</strong>${regions.length}</div>
+        <div style="margin-top:10px;"><strong>�����룺</strong>${data.normalized_spec_code || "δʶ��"}</div>
+        <div style="margin-top:10px;"><strong>�����ֶΣ�</strong>${JSON.stringify(data.ocr_fields)}</div>
+        <div style="margin-top:10px;"><strong>�쳣��ǩ��</strong>${anomalies}</div>
+        <div style="margin-top:10px;"><strong>���Ľ��飺</strong>${data.retake_advice}</div>
+        <div style="margin-top:10px;"><strong>ģ��Ȩ�أ�</strong>${data.model_path || ""}</div>
+        ${overlayHtml}`;
+    }
+
+    async function pollTask(taskId) {
+      for (let i = 0; i < 45; i += 1) {
+        await new Promise(r => setTimeout(r, 1000));
+        const resp = await fetch(`/api/v1/tasks/${taskId}`);
+        if (!resp.ok) throw new Error("��ѯ����ʧ��");
+        const status = await resp.json();
+        setStatus(`����״̬��${status.status}`);
+        if (status.status === "FAILED") throw new Error(status.error_message || "������ʧ��");
+        if (status.status === "DONE") {
+          const r = await fetch(`/api/v1/tasks/${taskId}/result`);
+          if (!r.ok) throw new Error("�����ȡʧ��");
+          renderResult(await r.json());
+          setStatus("ʶ�����", "status ok");
+          return;
+        }
+      }
+      throw new Error("��ѯ��ʱ��������");
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      setStatus("�����ύ����...");
+      try {
+        const fd = new FormData(form);
+        const metadata = {
+          project_name: fd.get("project_name"),
+          batch: fd.get("batch"),
+          yard: fd.get("yard"),
+          photographer: fd.get("photographer"),
+          captured_at: new Date(fd.get("captured_at")).toISOString(),
+        };
+
+        const payload = new FormData();
+        payload.append("metadata", JSON.stringify(metadata));
+        payload.append("image", fd.get("image"));
+        const tagImage = fd.get("tag_image");
+        if (tagImage && tagImage.size > 0) payload.append("tag_image", tagImage);
+
+        const resp = await fetch("/api/v1/tasks", { method: "POST", body: payload });
+        if (!resp.ok) throw new Error(await resp.text());
+
+        const data = await resp.json();
+        setStatus(`�����Ѵ�����${data.task_id}`);
+        await pollTask(data.task_id);
+      } catch (err) {
+        setStatus(err.message || "����ʧ��", "status error");
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

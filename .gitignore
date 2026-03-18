@@ -160,8 +160,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-
 # local training artifacts
-model_full/
-model_smoke/
+model_full/*
+!model_full/model_final.pth
+model_smoke/*
+!model_smoke/model_final.pth
 results/

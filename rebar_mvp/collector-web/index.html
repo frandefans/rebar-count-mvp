@@ -1,9 +1,9 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
-  <title>�ֽ��ͷ���� MVP</title>
+  <title>钢筋点根</title>
   <style>
     :root { --bg:#f5f7fb; --card:#fff; --accent:#0f766e; --text:#0f172a; --muted:#64748b; --error:#b91c1c; --ok:#047857; }
     * { box-sizing: border-box; }
@@ -26,24 +26,23 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="title">�ֽ��ͷ���� MVP����ͼ�ϴ���</div>
+    <div class="title">钢筋点根</div>
     <div class="card">
       <form id="capture-form" class="grid">
-        <label>��Ŀ����<input name="project_name" required /></label>
-        <label>����<input name="batch" required /></label>
-        <label>����<input name="yard" required /></label>
-        <label>������<input name="photographer" required /></label>
-        <label>����ʱ��<input type="datetime-local" name="captured_at" required /></label>
-        <label>�ֳ�ͼƬ���ش���<input type="file" name="image" accept="image/*" capture="environment" required /></label>
-        <label>����ͼ����ѡ��<input type="file" name="tag_image" accept="image/*" capture="environment" /></label>
-        <button id="submit-btn" type="submit">�ύʶ������</button>
-        <div id="status" class="status">�ȴ��ύ</div>
+        <label>项目名称<input name="project_name" required /></label>
+        <label>批次<input name="batch" required /></label>
+        <label>库区<input name="yard" required /></label>
+        <label>拍摄人<input name="photographer" required /></label>
+        <label>拍摄时间<input type="datetime-local" name="captured_at" required /></label>
+        <label>现场图片（必传）<input type="file" name="image" accept="image/*" capture="environment" required /></label>
+        <button id="submit-btn" type="submit">提交识别任务</button>
+        <div id="status" class="status">等待提交</div>
       </form>
     </div>
 
     <div class="card">
-      <div style="font-weight:700; margin-bottom:8px;">ʶ����</div>
-      <div id="result-empty" class="status">���޽��</div>
+      <div style="font-weight:700; margin-bottom:8px;">识别结果</div>
+      <div id="result-empty" class="status">暂无结果</div>
       <div id="result" style="display:none;"></div>
     </div>
   </div>
@@ -59,28 +58,28 @@
     function renderResult(data) {
       resultEmptyEl.style.display = "none";
       resultEl.style.display = "block";
-      const anomalies = (data.anomaly_codes || []).map(code => `<span class="pill">${code}</span>`).join("") || "��";
+      const anomalies = (data.anomaly_codes || []).map(code => `<span class="pill">${code}</span>`).join("") || "无";
       const regions = data.detection_regions || [];
       const headCount = (data.rebar_head_count ?? data.detected_head_count ?? 0);
       const method = data.detection_method || "unknown";
       const overlayHtml = data.overlay_image_b64
-        ? `<div style="margin-top:10px;"><strong>�������ͼ��</strong><img class="overlay-img" src="data:image/jpeg;base64,${data.overlay_image_b64}" alt="overlay" /></div>`
+        ? `<div style="margin-top:10px;"><strong>检测框叠加图：</strong><img class="overlay-img" src="data:image/jpeg;base64,${data.overlay_image_b64}" alt="overlay" /></div>`
         : "";
 
       resultEl.innerHTML = `
         <div class="result-grid">
-          <div><strong>�ֽ��ͷ����</strong>${headCount}</div>
-          <div><strong>��������(kg)��</strong>${data.estimated_weight_kg}</div>
-          <div><strong>����������</strong>${data.bundle_count}</div>
-          <div><strong>���Ŷȣ�</strong>${(data.confidence_score * 100).toFixed(1)}%</div>
+          <div><strong>钢筋端头数：</strong>${headCount}</div>
+          <div><strong>估算重量(kg)：</strong>${data.estimated_weight_kg}</div>
+          <div><strong>捆区域数：</strong>${data.bundle_count}</div>
+          <div><strong>置信度：</strong>${(data.confidence_score * 100).toFixed(1)}%</div>
         </div>
-        <div style="margin-top:10px;"><strong>��ⷽ����</strong>${method}</div>
-        <div style="margin-top:10px;"><strong>����������</strong>${regions.length}</div>
-        <div style="margin-top:10px;"><strong>�����룺</strong>${data.normalized_spec_code || "δʶ��"}</div>
-        <div style="margin-top:10px;"><strong>�����ֶΣ�</strong>${JSON.stringify(data.ocr_fields)}</div>
-        <div style="margin-top:10px;"><strong>�쳣��ǩ��</strong>${anomalies}</div>
-        <div style="margin-top:10px;"><strong>���Ľ��飺</strong>${data.retake_advice}</div>
-        <div style="margin-top:10px;"><strong>ģ��Ȩ�أ�</strong>${data.model_path || ""}</div>
+        <div style="margin-top:10px;"><strong>检测方法：</strong>${method}</div>
+        <div style="margin-top:10px;"><strong>检测框数量：</strong>${regions.length}</div>
+        <div style="margin-top:10px;"><strong>规格编码：</strong>${data.normalized_spec_code || "未识别"}</div>
+        <div style="margin-top:10px;"><strong>吊牌字段：</strong>${JSON.stringify(data.ocr_fields)}</div>
+        <div style="margin-top:10px;"><strong>异常标签：</strong>${anomalies}</div>
+        <div style="margin-top:10px;"><strong>补拍建议：</strong>${data.retake_advice}</div>
+        <div style="margin-top:10px;"><strong>模型权重：</strong>${data.model_path || ""}</div>
         ${overlayHtml}`;
     }
 
@@ -88,25 +87,25 @@
       for (let i = 0; i < 45; i += 1) {
         await new Promise(r => setTimeout(r, 1000));
         const resp = await fetch(`/api/v1/tasks/${taskId}`);
-        if (!resp.ok) throw new Error("��ѯ����ʧ��");
+        if (!resp.ok) throw new Error("查询任务失败");
         const status = await resp.json();
-        setStatus(`����״̬��${status.status}`);
-        if (status.status === "FAILED") throw new Error(status.error_message || "������ʧ��");
+        setStatus(`任务状态：${status.status}`);
+        if (status.status === "FAILED") throw new Error(status.error_message || "任务处理失败");
         if (status.status === "DONE") {
           const r = await fetch(`/api/v1/tasks/${taskId}/result`);
-          if (!r.ok) throw new Error("�����ȡʧ��");
+          if (!r.ok) throw new Error("结果获取失败");
           renderResult(await r.json());
-          setStatus("ʶ�����", "status ok");
+          setStatus("识别完成", "status ok");
           return;
         }
       }
-      throw new Error("��ѯ��ʱ��������");
+      throw new Error("轮询超时");
     }
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       submitBtn.disabled = true;
-      setStatus("�����ύ����...");
+      setStatus("正在提交任务...");
       try {
         const fd = new FormData(form);
         const metadata = {
@@ -127,10 +126,10 @@
         if (!resp.ok) throw new Error(await resp.text());
 
         const data = await resp.json();
-        setStatus(`�����Ѵ�����${data.task_id}`);
+        setStatus(`任务已创建：${data.task_id}`);
         await pollTask(data.task_id);
       } catch (err) {
-        setStatus(err.message || "����ʧ��", "status error");
+        setStatus(err.message || "请求失败", "status error");
       } finally {
         submitBtn.disabled = false;
       }

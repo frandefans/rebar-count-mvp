@@ -15,7 +15,7 @@ from torchvision.transforms import functional as tvf
 
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MODEL_PATH = ROOT / "model_full" / "model_final.pth"
+DEFAULT_MODEL_PATH = ROOT / "model_recall_boost" / "model_final.pth"
 
 
 def _resolve_device() -> torch.device:

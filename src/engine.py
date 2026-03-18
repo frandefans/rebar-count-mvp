@@ -6,7 +6,7 @@ import torchvision.models.detection.mask_rcnn
 
 from src.coco.coco_utils import get_coco_api_from_dataset
 from src.coco.coco_eval import CocoEvaluator
-import utils
+from src.utils import utils
 
 
 def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):

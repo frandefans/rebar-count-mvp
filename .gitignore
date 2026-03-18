@@ -170,3 +170,10 @@ results/
 rebar_mvp/counting-api/storage/
 rebar_mvp/counting-api/artifacts/
 
+
+# retrain artifacts
+model_recall_boost/*
+!model_recall_boost/model_final.pth
+artifacts/*
+!artifacts/hardcase_ids.txt
+

@@ -10,7 +10,7 @@ from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
 import pycocotools.mask as mask_util
 from collections import defaultdict
-import utils
+from src.utils import utils
 
 string_classes = str
 class CocoEvaluator(object):

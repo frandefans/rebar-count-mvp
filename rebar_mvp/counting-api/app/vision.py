@@ -237,6 +237,17 @@ def filter_primary_cluster_boxes(boxes: list[dict], shape: tuple[int, int]) -> l
     return kept if len(kept) >= max(6, int(0.6 * len(boxes))) else boxes
 
 
+def filter_boxes_inside_regions(boxes: list[dict], regions: list[dict]) -> list[dict]:
+    if not boxes or not regions:
+        return boxes
+    kept: list[dict] = []
+    for b in boxes:
+        cx, cy = _center(b)
+        if any(_in_region(cx, cy, region, pad_ratio=0.0) for region in regions):
+            kept.append(b)
+    return kept
+
+
 def build_overlay(image: np.ndarray, head_boxes: list[dict], regions: list[dict]) -> str | None:
     canvas = image.copy()
     for box in head_boxes[:800]:
@@ -298,15 +309,16 @@ def detect_rebar_heads(image: np.ndarray) -> dict:
         x2s = [b["x"] + b["w"] for b in cluster_boxes]
         y2s = [b["y"] + b["h"] for b in cluster_boxes]
         regions = [{"x": min(xs), "y": min(ys), "w": max(x2s) - min(xs), "h": max(y2s) - min(ys)}]
+    final_boxes = filter_boxes_inside_regions(cluster_boxes, regions)
 
     return {
-        "head_count": len(cluster_boxes),
+        "head_count": len(final_boxes),
         "bundle_count": len(regions),
         "regions": regions,
-        "overlay_image_b64": build_overlay(image, cluster_boxes, regions),
+        "overlay_image_b64": build_overlay(image, final_boxes, regions),
         "method": (
             "torch_frcnn_nms_clustered"
-            f"(full={len(full_raw_boxes)},tile={tile_added},raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)},cluster={len(cluster_boxes)},pad={os.getenv('VISION_CLUSTER_PAD', '0.10')})"
+            f"(full={len(full_raw_boxes)},tile={tile_added},raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)},cluster={len(cluster_boxes)},inside={len(final_boxes)},pad={os.getenv('VISION_CLUSTER_PAD', '0.10')})"
         ),
         "model_path": model_path,
     }

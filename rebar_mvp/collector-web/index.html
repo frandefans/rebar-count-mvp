@@ -23,6 +23,13 @@
     .example-note { padding:8px 10px; font-size:12px; color:#475569; min-height:44px; }
     label { font-size:14px; font-weight:600; }
     input, button { width:100%; border-radius:10px; border:1px solid #cbd5e1; padding:10px; font-size:14px; }
+    .file-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .file-hint { color:var(--muted); font-size:12px; margin-top:4px; }
+    .editor-wrap { margin-top:10px; border:1px solid #cbd5e1; border-radius:10px; padding:10px; background:#f8fafc; }
+    .editor-tools { display:grid; grid-template-columns:1fr 1fr; gap:8px; align-items:center; margin-bottom:8px; }
+    .editor-canvas { width:100%; max-height:420px; border:1px solid #94a3b8; border-radius:8px; background:#fff; touch-action:none; }
+    .editor-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
+    .btn-light { background:#334155; color:#fff; }
     button { background:var(--accent); color:#fff; border:none; font-weight:700; margin-top:8px; }
     .status { color:var(--muted); font-size:13px; margin-top:6px; }
     .result-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
@@ -70,12 +77,31 @@
     </div>
     <div class="card">
       <form id="capture-form" class="grid">
-        <label>项目名称<input name="project_name" required /></label>
-        <label>批次<input name="batch" required /></label>
-        <label>库区<input name="yard" required /></label>
-        <label>拍摄人<input name="photographer" required /></label>
-        <label>拍摄时间<input type="datetime-local" name="captured_at" required /></label>
-        <label>现场图片（必传）<input type="file" name="image" accept="image/*" capture="environment" required /></label>
+        <div>
+          <label style="display:block; margin-bottom:6px;">现场图片（必传）</label>
+          <div class="file-row">
+            <label>直接拍照<input id="image-camera" type="file" name="image_camera" accept="image/*" capture="environment" /></label>
+            <label>从相册选择<input id="image-file" type="file" name="image_file" accept="image/*" /></label>
+          </div>
+          <div class="file-hint">拍照和相册二选一即可，系统会优先使用你实际选择的那张图片。</div>
+          <div id="editor-wrap" class="editor-wrap" style="display:none;">
+            <div class="file-hint" style="margin-bottom:8px;">可选：用黑色画笔涂抹钢筋周围干扰区域，再进行计数。</div>
+            <div class="editor-tools">
+              <label style="font-size:13px; font-weight:600;">笔刷大小
+                <input id="brush-size" type="range" min="6" max="60" value="24" />
+              </label>
+              <label style="display:flex; gap:6px; align-items:center; font-size:13px; font-weight:600;">
+                <input id="use-edited-image" type="checkbox" checked style="width:auto; margin:0;" />
+                使用编辑后图片计数
+              </label>
+            </div>
+            <canvas id="edit-canvas" class="editor-canvas"></canvas>
+            <div class="editor-actions">
+              <button id="reset-image-btn" type="button" class="btn-light">恢复原图</button>
+              <button id="clear-mask-btn" type="button" class="btn-light">清空涂抹</button>
+            </div>
+          </div>
+        </div>
         <button id="submit-btn" type="submit">提交识别任务</button>
         <div id="status" class="status">等待提交</div>
       </form>
@@ -93,16 +119,92 @@
     const submitBtn = document.getElementById("submit-btn");
     const resultEl = document.getElementById("result");
     const resultEmptyEl = document.getElementById("result-empty");
+    const imageCameraInput = document.getElementById("image-camera");
+    const imageFileInput = document.getElementById("image-file");
+    const editorWrap = document.getElementById("editor-wrap");
+    const editCanvas = document.getElementById("edit-canvas");
+    const brushSizeInput = document.getElementById("brush-size");
+    const useEditedImageInput = document.getElementById("use-edited-image");
+    const resetImageBtn = document.getElementById("reset-image-btn");
+    const clearMaskBtn = document.getElementById("clear-mask-btn");
+
+    const canvasCtx = editCanvas.getContext("2d");
+    let sourceImage = null;
+    let sourceFile = null;
+    let editedFile = null;
+    let isDrawing = false;
+    let hasEdits = false;
 
     const setStatus = (msg, cls="status") => { statusEl.className = cls; statusEl.textContent = msg; };
+
+    function drawBaseImage() {
+      if (!sourceImage) return;
+      editCanvas.width = sourceImage.naturalWidth;
+      editCanvas.height = sourceImage.naturalHeight;
+      canvasCtx.fillStyle = "#000";
+      canvasCtx.fillRect(0, 0, editCanvas.width, editCanvas.height);
+      canvasCtx.drawImage(sourceImage, 0, 0);
+    }
+
+    function loadImageForEdit(file) {
+      return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error("图片加载失败"));
+          img.src = fr.result;
+        };
+        fr.onerror = () => reject(new Error("读取图片失败"));
+        fr.readAsDataURL(file);
+      });
+    }
+
+    async function onFileChosen(file, source) {
+      if (!file || file.size === 0) return;
+      try {
+        if (source === "camera") imageFileInput.value = "";
+        if (source === "file") imageCameraInput.value = "";
+        sourceFile = file;
+        editedFile = null;
+        hasEdits = false;
+        sourceImage = await loadImageForEdit(file);
+        drawBaseImage();
+        editorWrap.style.display = "block";
+      } catch (err) {
+        setStatus(err.message || "图片准备失败", "status error");
+      }
+    }
+
+    function drawAt(clientX, clientY) {
+      const rect = editCanvas.getBoundingClientRect();
+      const scaleX = editCanvas.width / rect.width;
+      const scaleY = editCanvas.height / rect.height;
+      const x = (clientX - rect.left) * scaleX;
+      const y = (clientY - rect.top) * scaleY;
+      const size = Number(brushSizeInput.value || 24);
+      canvasCtx.fillStyle = "#000000";
+      canvasCtx.beginPath();
+      canvasCtx.arc(x, y, size / 2, 0, Math.PI * 2);
+      canvasCtx.fill();
+      hasEdits = true;
+    }
+
+    function exportEditedFile() {
+      return new Promise((resolve) => {
+        editCanvas.toBlob((blob) => {
+          if (!blob) return resolve(null);
+          const f = new File([blob], "edited_upload.jpg", { type: "image/jpeg" });
+          resolve(f);
+        }, "image/jpeg", 0.95);
+      });
+    }
 
     function renderResult(data) {
       resultEmptyEl.style.display = "none";
       resultEl.style.display = "block";
-      const anomalies = (data.anomaly_codes || []).map(code => `<span class="pill">${code}</span>`).join("") || "无";
       const regions = data.detection_regions || [];
       const headCount = (data.rebar_head_count ?? data.detected_head_count ?? 0);
-      const method = data.detection_method || "unknown";
       const overlayHtml = data.overlay_image_b64
         ? `<div style="margin-top:10px;"><strong>检测框叠加图：</strong><img class="overlay-img" src="data:image/jpeg;base64,${data.overlay_image_b64}" alt="overlay" /></div>`
         : "";
@@ -110,18 +212,10 @@
       resultEl.innerHTML = `
         <div class="result-grid">
           <div><strong>钢筋端头数：</strong>${headCount}</div>
-          <div><strong>估算重量(kg)：</strong>${data.estimated_weight_kg}</div>
-          <div><strong>捆区域数：</strong>${data.bundle_count}</div>
-          <div><strong>置信度：</strong>${(data.confidence_score * 100).toFixed(1)}%</div>
+          <div><strong>检测框数量：</strong>${regions.length}</div>
         </div>
-        <div style="margin-top:10px;"><strong>检测方法：</strong>${method}</div>
-        <div style="margin-top:10px;"><strong>检测框数量：</strong>${regions.length}</div>
-        <div style="margin-top:10px;"><strong>规格编码：</strong>${data.normalized_spec_code || "未识别"}</div>
-        <div style="margin-top:10px;"><strong>吊牌字段：</strong>${JSON.stringify(data.ocr_fields)}</div>
-        <div style="margin-top:10px;"><strong>异常标签：</strong>${anomalies}</div>
-        <div style="margin-top:10px;"><strong>补拍建议：</strong>${data.retake_advice}</div>
-        <div style="margin-top:10px;"><strong>模型权重：</strong>${data.model_path || ""}</div>
-        ${overlayHtml}`;
+        ${overlayHtml}
+      `;
     }
 
     async function pollTask(taskId) {
@@ -143,23 +237,77 @@
       throw new Error("轮询超时");
     }
 
+    imageCameraInput.addEventListener("change", () => {
+      const file = imageCameraInput.files && imageCameraInput.files[0];
+      onFileChosen(file, "camera");
+    });
+    imageFileInput.addEventListener("change", () => {
+      const file = imageFileInput.files && imageFileInput.files[0];
+      onFileChosen(file, "file");
+    });
+
+    editCanvas.addEventListener("pointerdown", (e) => {
+      if (!sourceImage) return;
+      isDrawing = true;
+      drawAt(e.clientX, e.clientY);
+    });
+    editCanvas.addEventListener("pointermove", (e) => {
+      if (!sourceImage || !isDrawing) return;
+      drawAt(e.clientX, e.clientY);
+    });
+    const endDraw = () => { isDrawing = false; };
+    editCanvas.addEventListener("pointerup", endDraw);
+    editCanvas.addEventListener("pointerleave", endDraw);
+    editCanvas.addEventListener("pointercancel", endDraw);
+
+    resetImageBtn.addEventListener("click", () => {
+      if (!sourceImage) return;
+      drawBaseImage();
+      hasEdits = false;
+      editedFile = null;
+      setStatus("已恢复原图");
+    });
+
+    clearMaskBtn.addEventListener("click", () => {
+      if (!sourceImage) return;
+      drawBaseImage();
+      hasEdits = false;
+      editedFile = null;
+      setStatus("已清空涂抹");
+    });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       submitBtn.disabled = true;
       setStatus("正在提交任务...");
       try {
         const fd = new FormData(form);
+        // Backend schema still requires metadata fields in MVP; fill with safe defaults.
         const metadata = {
-          project_name: fd.get("project_name"),
-          batch: fd.get("batch"),
-          yard: fd.get("yard"),
-          photographer: fd.get("photographer"),
-          captured_at: new Date(fd.get("captured_at")).toISOString(),
+          project_name: "MOBILE_MVP",
+          batch: "AUTO",
+          yard: "AUTO",
+          photographer: "mobile_user",
+          captured_at: new Date().toISOString(),
         };
 
         const payload = new FormData();
+        const imageCamera = fd.get("image_camera");
+        const imageFile = fd.get("image_file");
+        let selectedImage = (imageFile && imageFile.size > 0) ? imageFile : imageCamera;
+        if (!selectedImage || selectedImage.size === 0) {
+          throw new Error("请先拍照或从相册选择一张图片");
+        }
+        if (useEditedImageInput.checked && sourceImage) {
+          if (hasEdits || !editedFile) {
+            editedFile = await exportEditedFile();
+          }
+          if (editedFile) {
+            selectedImage = editedFile;
+          }
+        }
         payload.append("metadata", JSON.stringify(metadata));
-        payload.append("image", fd.get("image"));
+        payload.append("image", selectedImage);
         const tagImage = fd.get("tag_image");
         if (tagImage && tagImage.size > 0) payload.append("tag_image", tagImage);
 

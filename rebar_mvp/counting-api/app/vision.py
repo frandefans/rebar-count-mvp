@@ -4,12 +4,14 @@ import base64
 import math
 import os
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 import torchvision
+from PIL import Image, ImageOps
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.transforms import functional as tvf
 
@@ -52,11 +54,18 @@ def get_model() -> tuple[torch.nn.Module, torch.device, str]:
 
 
 def decode_image(image_bytes: bytes) -> np.ndarray:
-    arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("invalid image")
-    return img
+    # EXIF transpose is critical for mobile uploads (prevents rotated inference misses).
+    try:
+        pil = Image.open(BytesIO(image_bytes))
+        pil = ImageOps.exif_transpose(pil).convert("RGB")
+        rgb = np.array(pil)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("invalid image")
+        return img
 
 
 def assess_quality(image: np.ndarray) -> dict:
@@ -81,6 +90,65 @@ def _boxes_to_tensor(boxes: list[dict]) -> tuple[torch.Tensor, torch.Tensor]:
     t_boxes = torch.tensor([[b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"]] for b in boxes], dtype=torch.float32)
     t_scores = torch.tensor([b["score"] for b in boxes], dtype=torch.float32)
     return t_boxes, t_scores
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tile_starts(total: int, size: int, overlap: float) -> list[int]:
+    if total <= size:
+        return [0]
+    step = max(1, int(size * (1.0 - overlap)))
+    starts = list(range(0, total - size + 1, step))
+    last = total - size
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def _iter_tiles(width: int, height: int, tile_size: int, overlap: float):
+    xs = _tile_starts(width, tile_size, overlap)
+    ys = _tile_starts(height, tile_size, overlap)
+    for y in ys:
+        for x in xs:
+            yield x, y, min(tile_size, width - x), min(tile_size, height - y)
+
+
+def _infer_raw_boxes_from_rgb(
+    model: torch.nn.Module,
+    device: torch.device,
+    rgb: np.ndarray,
+    score_thr: float,
+    offset_x: int = 0,
+    offset_y: int = 0,
+) -> list[dict]:
+    tensor = tvf.to_tensor(rgb).to(device)
+    with torch.no_grad():
+        output = model([tensor])[0]
+
+    boxes = output.get("boxes", torch.zeros((0, 4))).detach().cpu().numpy()
+    scores = output.get("scores", torch.zeros((0,))).detach().cpu().numpy()
+
+    raw_boxes: list[dict] = []
+    for box, score in zip(boxes, scores):
+        sc = float(score)
+        if sc < score_thr:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in box.tolist()]
+        raw_boxes.append(
+            {
+                "x": max(0, x1 + offset_x),
+                "y": max(0, y1 + offset_y),
+                "w": max(1, x2 - x1),
+                "h": max(1, y2 - y1),
+                "score": sc,
+            }
+        )
+    return raw_boxes
 
 
 def dedup_center_distance(boxes: list[dict], shape: tuple[int, int]) -> list[dict]:
@@ -159,10 +227,11 @@ def filter_primary_cluster_boxes(boxes: list[dict], shape: tuple[int, int]) -> l
         return boxes
 
     primary = regions[0]
+    pad_ratio = float(os.getenv("VISION_CLUSTER_PAD", "0.10"))
     kept = []
     for b in boxes:
         cx, cy = _center(b)
-        if _in_region(cx, cy, primary, pad_ratio=0.08):
+        if _in_region(cx, cy, primary, pad_ratio=pad_ratio):
             kept.append(b)
 
     return kept if len(kept) >= max(6, int(0.6 * len(boxes))) else boxes
@@ -188,28 +257,29 @@ def build_overlay(image: np.ndarray, head_boxes: list[dict], regions: list[dict]
 def detect_rebar_heads(image: np.ndarray) -> dict:
     model, device, model_path = get_model()
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    tensor = tvf.to_tensor(rgb).to(device)
-    threshold = float(os.getenv("VISION_SCORE_THRESHOLD", "0.74"))
+    threshold = float(os.getenv("VISION_SCORE_THRESHOLD", "0.62"))
 
-    with torch.no_grad():
-        output = model([tensor])[0]
+    full_raw_boxes = _infer_raw_boxes_from_rgb(model, device, rgb, threshold, offset_x=0, offset_y=0)
+    raw_boxes = list(full_raw_boxes)
 
-    boxes = output.get("boxes", torch.zeros((0, 4))).detach().cpu().numpy()
-    scores = output.get("scores", torch.zeros((0,))).detach().cpu().numpy()
+    tile_added = 0
+    tile_enabled = _env_flag("VISION_ENABLE_TILE", True)
+    tile_size = int(os.getenv("VISION_TILE_SIZE", "1280"))
+    tile_overlap = float(os.getenv("VISION_TILE_OVERLAP", "0.25"))
+    tile_score_delta = float(os.getenv("VISION_TILE_SCORE_DELTA", "-0.05"))
+    tile_score_thr = max(0.01, min(0.99, threshold + tile_score_delta))
 
-    raw_boxes = []
-    for box, score in zip(boxes, scores):
-        sc = float(score)
-        if sc < threshold:
-            continue
-        x1, y1, x2, y2 = [int(round(v)) for v in box.tolist()]
-        raw_boxes.append({
-            "x": max(0, x1),
-            "y": max(0, y1),
-            "w": max(1, x2 - x1),
-            "h": max(1, y2 - y1),
-            "score": sc,
-        })
+    h, w = image.shape[:2]
+    if tile_enabled and max(h, w) > tile_size:
+        for x, y, tw, th in _iter_tiles(w, h, tile_size, tile_overlap):
+            crop_rgb = rgb[y:y + th, x:x + tw]
+            tile_boxes = _infer_raw_boxes_from_rgb(model, device, crop_rgb, tile_score_thr, offset_x=x, offset_y=y)
+            raw_boxes.extend(tile_boxes)
+            tile_added += len(tile_boxes)
+
+    pre_nms_topk = int(os.getenv("VISION_PRE_NMS_TOPK", "3000"))
+    if len(raw_boxes) > pre_nms_topk:
+        raw_boxes = sorted(raw_boxes, key=lambda b: b["score"], reverse=True)[:pre_nms_topk]
 
     t_boxes, t_scores = _boxes_to_tensor(raw_boxes)
     if len(raw_boxes) > 0:
@@ -236,7 +306,7 @@ def detect_rebar_heads(image: np.ndarray) -> dict:
         "overlay_image_b64": build_overlay(image, cluster_boxes, regions),
         "method": (
             "torch_frcnn_nms_clustered"
-            f"(raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)},cluster={len(cluster_boxes)})"
+            f"(full={len(full_raw_boxes)},tile={tile_added},raw={len(raw_boxes)},nms={len(nms_boxes)},dedup={len(dedup_boxes)},cluster={len(cluster_boxes)},pad={os.getenv('VISION_CLUSTER_PAD', '0.10')})"
         ),
         "model_path": model_path,
     }

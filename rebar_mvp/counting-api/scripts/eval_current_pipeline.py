@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 import torchvision
 from PIL import Image
@@ -113,15 +114,27 @@ def filter_primary_cluster_boxes_custom(boxes: list[dict], shape: tuple[int, int
     return kept if len(kept) >= max(6, int(0.6 * len(boxes))) else boxes
 
 
-def predict_current_pipeline(
-    model,
-    device,
-    img: Image.Image,
-    score_thr: float,
-    nms_iou: float,
-    cluster_pad: float,
-):
-    t = tvf.to_tensor(img).to(device)
+def _tile_starts(total: int, size: int, overlap: float) -> list[int]:
+    if total <= size:
+        return [0]
+    step = max(1, int(size * (1.0 - overlap)))
+    starts = list(range(0, total - size + 1, step))
+    last = total - size
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def _iter_tiles(width: int, height: int, tile_size: int, overlap: float):
+    xs = _tile_starts(width, tile_size, overlap)
+    ys = _tile_starts(height, tile_size, overlap)
+    for y in ys:
+        for x in xs:
+            yield x, y, min(tile_size, width - x), min(tile_size, height - y)
+
+
+def _infer_raw_boxes(model, device, rgb_img, score_thr: float, offset_x: int = 0, offset_y: int = 0):
+    t = tvf.to_tensor(rgb_img).to(device)
     with torch.no_grad():
         out = model([t])[0]
 
@@ -134,7 +147,44 @@ def predict_current_pipeline(
         if sc < score_thr:
             continue
         x1, y1, x2, y2 = [float(v) for v in b.tolist()]
-        raw.append({"x": max(0.0, x1), "y": max(0.0, y1), "w": max(1.0, x2 - x1), "h": max(1.0, y2 - y1), "score": sc})
+        raw.append(
+            {
+                "x": max(0.0, x1 + offset_x),
+                "y": max(0.0, y1 + offset_y),
+                "w": max(1.0, x2 - x1),
+                "h": max(1.0, y2 - y1),
+                "score": sc,
+            }
+        )
+    return raw
+
+
+def predict_current_pipeline(
+    model,
+    device,
+    img: Image.Image,
+    score_thr: float,
+    nms_iou: float,
+    cluster_pad: float,
+    enable_tile: bool,
+    tile_size: int,
+    tile_overlap: float,
+    tile_score_delta: float,
+):
+    rgb = np.array(img)
+
+    full_raw = _infer_raw_boxes(model, device, rgb, score_thr, 0, 0)
+    raw = list(full_raw)
+
+    tile_raw_count = 0
+    h, w = rgb.shape[:2]
+    if enable_tile and max(h, w) > tile_size:
+        tile_thr = max(0.01, min(0.99, score_thr + tile_score_delta))
+        for x, y, tw, th in _iter_tiles(w, h, tile_size, tile_overlap):
+            crop = rgb[y:y + th, x:x + tw]
+            tile_raw = _infer_raw_boxes(model, device, crop, tile_thr, x, y)
+            raw.extend(tile_raw)
+            tile_raw_count += len(tile_raw)
 
     if raw:
         t_boxes = torch.tensor([[r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"]] for r in raw], dtype=torch.float32)
@@ -144,12 +194,18 @@ def predict_current_pipeline(
     else:
         nms = []
 
-    w, h = img.size
     dedup = dedup_center_distance(nms, (h, w))
     cluster = filter_primary_cluster_boxes_custom(dedup, (h, w), pad_ratio=cluster_pad)
 
     pred = [Box(x1=b["x"], y1=b["y"], x2=b["x"] + b["w"], y2=b["y"] + b["h"], score=b["score"]) for b in cluster]
-    return pred, {"raw": len(raw), "nms": len(nms), "dedup": len(dedup), "cluster": len(cluster)}
+    return pred, {
+        "full_raw": len(full_raw),
+        "tile_raw": tile_raw_count,
+        "raw": len(raw),
+        "nms": len(nms),
+        "dedup": len(dedup),
+        "cluster": len(cluster),
+    }
 
 
 def match_counts(pred: list[Box], gt: list[Box], iou_thr: float):
@@ -189,11 +245,17 @@ def evaluate(
     nms_iou: float,
     iou_thr: float,
     cluster_pad: float,
+    enable_tile: bool,
+    tile_size: int,
+    tile_overlap: float,
+    tile_score_delta: float,
 ):
     tp = fp = fn = 0
     abs_err = []
     sq_err = []
     ape = []
+    stage_full_raw = []
+    stage_tile_raw = []
     stage_raw = []
     stage_nms = []
     stage_dedup = []
@@ -203,7 +265,18 @@ def evaluate(
     for image_id in ids:
         img = Image.open(image_path(root, image_id)).convert("RGB")
         gt = read_gt(root / "Annotations" / f"{image_id}.xml", target_class)
-        pred, stage = predict_current_pipeline(model, device, img, score_thr, nms_iou, cluster_pad)
+        pred, stage = predict_current_pipeline(
+            model,
+            device,
+            img,
+            score_thr,
+            nms_iou,
+            cluster_pad,
+            enable_tile,
+            tile_size,
+            tile_overlap,
+            tile_score_delta,
+        )
 
         _tp, _fp, _fn = match_counts(pred, gt, iou_thr)
         tp += _tp
@@ -218,6 +291,8 @@ def evaluate(
         if gc > 0:
             ape.append(abs(err) / gc)
 
+        stage_full_raw.append(stage["full_raw"])
+        stage_tile_raw.append(stage["tile_raw"])
         stage_raw.append(stage["raw"])
         stage_nms.append(stage["nms"])
         stage_dedup.append(stage["dedup"])
@@ -233,6 +308,8 @@ def evaluate(
                 "tp": _tp,
                 "fp": _fp,
                 "fn": _fn,
+                "full_raw": stage["full_raw"],
+                "tile_raw": stage["tile_raw"],
                 "raw": stage["raw"],
                 "nms": stage["nms"],
                 "dedup": stage["dedup"],
@@ -260,6 +337,8 @@ def evaluate(
         "mae": mae,
         "rmse": rmse,
         "mape": mape,
+        "full_raw_avg": statistics.mean(stage_full_raw),
+        "tile_raw_avg": statistics.mean(stage_tile_raw),
         "raw_avg": statistics.mean(stage_raw),
         "nms_avg": statistics.mean(stage_nms),
         "dedup_avg": statistics.mean(stage_dedup),
@@ -270,7 +349,22 @@ def evaluate(
 
 def write_per_image_csv(path: Path, rows: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["image_id", "gt_count", "pred_count", "err", "abs_err", "tp", "fp", "fn", "raw", "nms", "dedup", "cluster"]
+    fields = [
+        "image_id",
+        "gt_count",
+        "pred_count",
+        "err",
+        "abs_err",
+        "tp",
+        "fp",
+        "fn",
+        "full_raw",
+        "tile_raw",
+        "raw",
+        "nms",
+        "dedup",
+        "cluster",
+    ]
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -287,6 +381,10 @@ def main():
     ap.add_argument("--nms-iou", type=float, default=0.35)
     ap.add_argument("--iou-thr", type=float, default=0.5)
     ap.add_argument("--cluster-pad", type=float, default=0.08)
+    ap.add_argument("--enable-tile", action="store_true")
+    ap.add_argument("--tile-size", type=int, default=1280)
+    ap.add_argument("--tile-overlap", type=float, default=0.25)
+    ap.add_argument("--tile-score-delta", type=float, default=-0.05)
     ap.add_argument("--split", choices=["all", "holdout20"], default="all")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="auto")
@@ -320,12 +418,20 @@ def main():
         nms_iou=args.nms_iou,
         iou_thr=args.iou_thr,
         cluster_pad=args.cluster_pad,
+        enable_tile=args.enable_tile,
+        tile_size=args.tile_size,
+        tile_overlap=args.tile_overlap,
+        tile_score_delta=args.tile_score_delta,
     )
 
     print("==== Evaluation (current pipeline) ====")
     print(f"images={len(ids)} split={args.split} class={args.target_class}")
     print(f"weight={weight}")
-    print(f"score_thr={args.score_thr} nms_iou={args.nms_iou} iou_thr={args.iou_thr} cluster_pad={args.cluster_pad}")
+    print(
+        f"score_thr={args.score_thr} nms_iou={args.nms_iou} iou_thr={args.iou_thr} "
+        f"cluster_pad={args.cluster_pad} enable_tile={args.enable_tile} "
+        f"tile_size={args.tile_size} tile_overlap={args.tile_overlap} tile_score_delta={args.tile_score_delta}"
+    )
     print("---- detection metrics ----")
     print(f"TP={out['tp']} FP={out['fp']} FN={out['fn']}")
     print(f"precision={out['precision']:.4f}")
@@ -337,6 +443,8 @@ def main():
     print(f"rmse={out['rmse']:.4f}")
     print(f"mape={out['mape']:.4f}")
     print("---- stage counts (per-image avg) ----")
+    print(f"full_raw_avg={out['full_raw_avg']:.2f}")
+    print(f"tile_raw_avg={out['tile_raw_avg']:.2f}")
     print(f"raw_avg={out['raw_avg']:.2f}")
     print(f"nms_avg={out['nms_avg']:.2f}")
     print(f"dedup_avg={out['dedup_avg']:.2f}")

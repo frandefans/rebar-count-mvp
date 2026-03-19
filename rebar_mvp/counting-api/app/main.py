@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,12 @@ ROOT = Path(__file__).resolve().parents[3]
 WEB_DIR = ROOT / "rebar_mvp" / "collector-web"
 STORAGE = ROOT / "rebar_mvp" / "counting-api" / "storage"
 STORAGE.mkdir(parents=True, exist_ok=True)
+SAMPLE_DATASET_ROOT = Path(
+    os.getenv(
+        "SAMPLE_DATASET_ROOT",
+        r"C:\Users\76884\Downloads\dataset_reinforcing_steel_bar_counting\JPEGImages",
+    )
+)
 
 
 class TaskMetadata(BaseModel):
@@ -42,6 +49,20 @@ TASKS: dict[str, dict] = {}
 @app.get("/")
 def root() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/api/v1/sample-image/{image_id}")
+def sample_image(image_id: str):
+    safe_id = "".join(ch for ch in image_id if ch.isalnum())
+    if not safe_id:
+        raise HTTPException(status_code=400, detail="invalid image id")
+
+    for ext in (".jpg", ".png", ".jpeg", ".JPG", ".PNG", ".JPEG"):
+        img_path = SAMPLE_DATASET_ROOT / f"{safe_id}{ext}"
+        if img_path.exists():
+            return FileResponse(img_path)
+
+    raise HTTPException(status_code=404, detail=f"sample image not found: {safe_id}")
 
 
 @app.post("/api/v1/tasks")
